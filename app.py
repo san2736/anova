@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 st.set_page_config(page_title="ANOVA Analyzer", layout="centered")
 
-st.title("Automatic ANOVA Analysis")
+st.title("Automatic ANOVA + Tukey Analysis")
 
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
@@ -17,18 +18,15 @@ if uploaded_file is not None:
 
     columns = df.columns.tolist()
 
-    # Select dependent variable
     dependent = st.selectbox("Select Dependent Variable", columns)
 
     if st.button("Run Analysis"):
 
-        # SMART CHECK 1: dependent must be numeric
+        # check numeric dependent
         if not pd.api.types.is_numeric_dtype(df[dependent]):
             st.error("Dependent variable must be numeric")
         else:
-            st.subheader("ANOVA Results")
-
-            results_found = False
+            st.subheader("Results")
 
             for col in columns:
                 if col == dependent:
@@ -36,20 +34,37 @@ if uploaded_file is not None:
 
                 unique_vals = df[col].nunique()
 
-                # SMART CHECK 2: treat as categorical only if limited unique values
+                # treat as categorical
                 if unique_vals <= 10:
                     try:
                         formula = f'{dependent} ~ C({col})'
                         model = ols(formula, data=df).fit()
                         anova_table = sm.stats.anova_lm(model, typ=2)
 
+                        p_value = anova_table["PR(>F)"][0]
+
                         st.write(f"Factor: {col}")
                         st.dataframe(anova_table)
 
-                        results_found = True
+                        # ONLY run Tukey if significant
+                        if p_value < 0.05:
+                            st.success("Significant → Running Tukey Test")
 
-                    except:
-                        continue
+                            tukey = pairwise_tukeyhsd(
+                                endog=df[dependent],
+                                groups=df[col],
+                                alpha=0.05
+                            )
 
-            if not results_found:
-                st.warning("No suitable categorical variables found (need <=10 unique values)")
+                            tukey_df = pd.DataFrame(
+                                tukey._results_table.data[1:],
+                                columns=tukey._results_table.data[0]
+                            )
+
+                            st.dataframe(tukey_df)
+
+                        else:
+                            st.info("Not significant → Tukey skipped")
+
+                    except Exception as e:
+                        st.warning(f"Skipped {col} due to error")
