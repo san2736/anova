@@ -5,17 +5,15 @@ from scipy import stats
 from itertools import combinations
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
-st.title("Advanced ANOVA → Tukey → T-Test Pipeline")
+st.title("Smart ANOVA → Tukey → T-Test")
 
 file = st.file_uploader("Upload CSV", type=["csv"])
 
 if file is not None:
     df = pd.read_csv(file)
 
-    st.write("Data Preview:")
     st.dataframe(df.head())
 
-    # Step 1: select continuous variable
     num_cols = df.select_dtypes(include=np.number).columns.tolist()
     target = st.selectbox("Select Continuous Variable", num_cols)
 
@@ -23,12 +21,11 @@ if file is not None:
 
         alpha = 0.05
 
-        # Step 2: categorical columns
+        # Identify categorical only
         cat_cols = df.select_dtypes(exclude=np.number).columns.tolist()
+        st.write("Categorical Columns:", cat_cols)
 
-        st.write("Categorical columns:", cat_cols)
-
-        # -------- STEP 1: INDIVIDUAL --------
+        # -------- STEP 1 --------
         st.subheader("Step 1: Individual ANOVA")
 
         significant_vars = []
@@ -36,9 +33,9 @@ if file is not None:
         for col in cat_cols:
             temp = df[[col, target]].dropna()
 
-            groups = [temp[temp[col] == val][target]
-                      for val in temp[col].unique()
-                      if len(temp[temp[col] == val]) > 1]
+            groups = [temp[temp[col] == v][target]
+                      for v in temp[col].unique()
+                      if len(temp[temp[col] == v]) > 1]
 
             if len(groups) > 1:
                 f, p = stats.f_oneway(*groups)
@@ -47,118 +44,129 @@ if file is not None:
                 if p < alpha:
                     significant_vars.append(col)
 
-        st.write("Significant after Step 1:", significant_vars)
+        st.write("After Step 1:", significant_vars)
 
-        # -------- STEP 2: ADDITIVE COMBINATIONS --------
-        st.subheader("Step 2: Additive Combinations")
+        # -------- STEP 2 (ADDITIVE WITH PRUNING) --------
+        st.subheader("Step 2: Additive Pruning")
 
-        add_significant = []
+        var_score = {v: 0 for v in significant_vars}
 
-        for r in range(2, len(significant_vars) + 1):
-            for combo in combinations(significant_vars, r):
+        for combo in combinations(significant_vars, 2):
 
-                new_col = "_".join(combo)
+            new_col = "_".join(combo)
 
-                temp = df[list(combo) + [target]].dropna()
-                temp[new_col] = temp[list(combo)].astype(str).agg("_".join, axis=1)
+            temp = df[list(combo) + [target]].dropna()
+            temp[new_col] = temp[list(combo)].astype(str).agg("_".join, axis=1)
 
-                groups = [temp[temp[new_col] == val][target]
-                          for val in temp[new_col].unique()
-                          if len(temp[temp[new_col] == val]) > 1]
-
-                if len(groups) > 1:
-                    f, p = stats.f_oneway(*groups)
-                    st.write(f"{new_col} → p = {p:.4f}")
-
-                    if p < alpha:
-                        add_significant.append(new_col)
-
-        st.write("Significant after Step 2:", add_significant)
-
-        # -------- STEP 3: INTERACTION --------
-        st.subheader("Step 3: Interaction (Multiplication-like)")
-
-        final_vars = []
-
-        for col in add_significant:
-            temp = df[[target]].copy()
-            temp[col] = df[col.split("_")].astype(str).agg("_".join, axis=1)
-            temp = temp.dropna()
-
-            groups = [temp[temp[col] == val][target]
-                      for val in temp[col].unique()
-                      if len(temp[temp[col] == val]) > 1]
+            groups = [temp[temp[new_col] == val][target]
+                      for val in temp[new_col].unique()
+                      if len(temp[temp[new_col] == val]) > 1]
 
             if len(groups) > 1:
                 f, p = stats.f_oneway(*groups)
-                st.write(f"{col} → p = {p:.4f}")
+                st.write(f"{new_col} → p = {p:.4f}")
 
                 if p < alpha:
-                    final_vars.append(col)
+                    for v in combo:
+                        var_score[v] += 1
+                else:
+                    for v in combo:
+                        var_score[v] -= 1
 
-        st.write("Final selected variables:", final_vars)
+        # Keep only strong variables
+        pruned_vars = [v for v in var_score if var_score[v] > 0]
+
+        st.write("After Additive Pruning:", pruned_vars)
+
+        # -------- STEP 3 (INTERACTION WITH PRUNING) --------
+        st.subheader("Step 3: Interaction Pruning")
+
+        var_score2 = {v: 0 for v in pruned_vars}
+
+        for combo in combinations(pruned_vars, 2):
+
+            new_col = "_".join(combo)
+
+            temp = df[list(combo) + [target]].dropna()
+            temp[new_col] = temp[list(combo)].astype(str).agg("_".join, axis=1)
+
+            groups = [temp[temp[new_col] == val][target]
+                      for val in temp[new_col].unique()
+                      if len(temp[temp[new_col] == val]) > 1]
+
+            if len(groups) > 1:
+                f, p = stats.f_oneway(*groups)
+                st.write(f"{new_col} → p = {p:.4f}")
+
+                if p < alpha:
+                    for v in combo:
+                        var_score2[v] += 1
+                else:
+                    for v in combo:
+                        var_score2[v] -= 1
+
+        final_vars = [v for v in var_score2 if var_score2[v] > 0]
+
+        st.write("Final Variables:", final_vars)
 
         # -------- STEP 4: TUKEY --------
-        st.subheader("Step 4: Tukey HSD")
+        st.subheader("Step 4: Tukey")
 
-        tukey_results_df = pd.DataFrame()
+        tukey_df = pd.DataFrame()
 
-        for col in final_vars:
+        for combo in combinations(final_vars, 2):
+
+            col = "_".join(combo)
+
             temp = df.copy()
-            temp[col] = temp[col.split("_")].astype(str).agg("_".join, axis=1)
+            temp[col] = temp[list(combo)].astype(str).agg("_".join, axis=1)
             temp = temp[[col, target]].dropna()
 
-            tukey = pairwise_tukeyhsd(
-                endog=temp[target],
-                groups=temp[col],
-                alpha=alpha
-            )
+            tukey = pairwise_tukeyhsd(temp[target], temp[col])
 
-            res_df = pd.DataFrame(data=tukey._results_table.data[1:],
-                                  columns=tukey._results_table.data[0])
+            res = pd.DataFrame(tukey._results_table.data[1:],
+                               columns=tukey._results_table.data[0])
 
-            # Keep only TRUE (reject)
-            res_df = res_df[res_df['reject'] == True]
+            res = res[res['reject'] == True]
 
-            if not res_df.empty:
-                res_df['variable'] = col
-                tukey_results_df = pd.concat([tukey_results_df, res_df])
+            if not res.empty:
+                res['variable'] = col
+                tukey_df = pd.concat([tukey_df, res])
 
-        if tukey_results_df.empty:
-            st.warning("No significant Tukey results.")
+        if tukey_df.empty:
+            st.warning("No Tukey results")
         else:
-            st.dataframe(tukey_results_df)
+            st.dataframe(tukey_df)
 
-            # -------- STEP 5: MAX MEAN DIFF --------
+            # -------- STEP 5 --------
             st.subheader("Step 5: Max Mean Difference")
 
-            tukey_results_df['abs_diff'] = tukey_results_df['meandiff'].abs()
+            tukey_df['abs_diff'] = tukey_df['meandiff'].abs()
+            best = tukey_df.loc[tukey_df['abs_diff'].idxmax()]
 
-            best_row = tukey_results_df.loc[tukey_results_df['abs_diff'].idxmax()]
+            st.write(best)
 
-            st.write("Best Pair:")
-            st.write(best_row)
-
-            # -------- STEP 6: T-TEST --------
+            # -------- STEP 6 --------
             st.subheader("Step 6: Final T-Test")
 
-            var = best_row['variable']
-            g1 = best_row['group1']
-            g2 = best_row['group2']
+            var = best['variable']
+            g1 = best['group1']
+            g2 = best['group2']
 
             temp = df.copy()
-            temp[var] = temp[var.split("_")].astype(str).agg("_".join, axis=1)
+            cols = var.split("_")
+
+            temp[var] = temp[cols].astype(str).agg("_".join, axis=1)
             temp = temp[[var, target]].dropna()
 
-            group1 = temp[temp[var] == g1][target]
-            group2 = temp[temp[var] == g2][target]
+            grp1 = temp[temp[var] == g1][target]
+            grp2 = temp[temp[var] == g2][target]
 
-            t_stat, p_val = stats.ttest_ind(group1, group2)
+            t, p = stats.ttest_ind(grp1, grp2)
 
-            st.write(f"T-statistic: {t_stat:.4f}")
-            st.write(f"P-value: {p_val:.4f}")
+            st.write(f"T = {t:.4f}, p = {p:.4f}")
 
-            if p_val < alpha:
-                st.success("Final result is SIGNIFICANT")
+            if p < alpha:
+                st.success("SIGNIFICANT")
             else:
-                st.error("Final result is NOT significant")
+                st.error("NOT SIGNIFICANT")
