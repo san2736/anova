@@ -1,70 +1,78 @@
 import streamlit as st
 import pandas as pd
-import statsmodels.api as sm
-from statsmodels.formula.api import ols
+import numpy as np
+from scipy import stats
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
-
-st.set_page_config(page_title="ANOVA Analyzer", layout="centered")
 
 st.title("Automatic ANOVA + Tukey Analysis")
 
-uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+# Upload file
+file = st.file_uploader("Upload CSV file", type=["csv"])
 
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+if file is not None:
+    df = pd.read_csv(file)
 
-    st.subheader("Dataset Preview")
+    st.write("Preview of Data:")
     st.dataframe(df.head())
 
-    columns = df.columns.tolist()
+    # Select continuous variable
+    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
-    dependent = st.selectbox("Select Dependent Variable", columns)
+    target = st.selectbox("Select Continuous Variable (e.g., balance)", numeric_cols)
 
-    if st.button("Run Analysis"):
+    if target:
+        st.write(f"Selected variable: {target}")
 
-        # check numeric dependent
-        if not pd.api.types.is_numeric_dtype(df[dependent]):
-            st.error("Dependent variable must be numeric")
+        # Identify categorical columns
+        cat_cols = df.select_dtypes(exclude=np.number).columns.tolist()
+
+        if len(cat_cols) == 0:
+            st.warning("No categorical columns found.")
         else:
-            st.subheader("Results")
+            st.write("Categorical columns detected:")
+            st.write(cat_cols)
 
-            for col in columns:
-                if col == dependent:
-                    continue
+            alpha = 0.05
 
-                unique_vals = df[col].nunique()
+            results = []
 
-                # treat as categorical
-                if unique_vals <= 10:
-                    try:
-                        formula = f'{dependent} ~ C({col})'
-                        model = ols(formula, data=df).fit()
-                        anova_table = sm.stats.anova_lm(model, typ=2)
+            for col in cat_cols:
+                groups = []
 
-                        p_value = anova_table["PR(>F)"][0]
+                # Drop NA properly
+                temp = df[[col, target]].dropna()
 
-                        st.write(f"Factor: {col}")
-                        st.dataframe(anova_table)
+                unique_vals = temp[col].unique()
 
-                        # ONLY run Tukey if significant
-                        if p_value < 0.05:
-                            st.success("Significant → Running Tukey Test")
+                for val in unique_vals:
+                    group = temp[temp[col] == val][target]
+                    if len(group) > 1:
+                        groups.append(group)
 
-                            tukey = pairwise_tukeyhsd(
-                                endog=df[dependent],
-                                groups=df[col],
-                                alpha=0.05
-                            )
+                if len(groups) > 1:
+                    f_stat, p_val = stats.f_oneway(*groups)
 
-                            tukey_df = pd.DataFrame(
-                                tukey._results_table.data[1:],
-                                columns=tukey._results_table.data[0]
-                            )
+                    results.append((col, f_stat, p_val))
 
-                            st.dataframe(tukey_df)
+            # Show ANOVA results
+            st.subheader("ANOVA Results")
 
-                        else:
-                            st.info("Not significant → Tukey skipped")
+            for col, f_stat, p_val in results:
+                st.write(f"{col} → F = {f_stat:.4f}, p = {p_val:.4f}")
 
-                    except Exception as e:
-                        st.warning(f"Skipped {col} due to error")
+            # Tukey for significant ones
+            st.subheader("Tukey Test (Only Significant ANOVA)")
+
+            for col, f_stat, p_val in results:
+                if p_val < alpha:
+                    st.write(f"Running Tukey for: {col}")
+
+                    temp = df[[col, target]].dropna()
+
+                    tukey = pairwise_tukeyhsd(
+                        endog=temp[target],
+                        groups=temp[col],
+                        alpha=alpha
+                    )
+
+                    st.text(tukey.summary())
