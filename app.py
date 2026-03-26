@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
-st.set_page_config(page_title="ANOVA Analysis", layout="centered")
+st.set_page_config(page_title="ANOVA Analyzer", layout="centered")
 
-st.title("Two-Way ANOVA Analysis")
+st.title("Automatic ANOVA Analysis")
 
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
@@ -18,40 +17,39 @@ if uploaded_file is not None:
 
     columns = df.columns.tolist()
 
-    st.subheader("Select Variables")
-
+    # Select dependent variable
     dependent = st.selectbox("Select Dependent Variable", columns)
-    factor1 = st.selectbox("Select First Factor", columns)
-    factor2 = st.selectbox("Select Second Factor", columns)
 
     if st.button("Run Analysis"):
 
-        try:
-            # ANOVA
-            formula = f'{dependent} ~ {factor1} * {factor2}'
-            model = ols(formula, data=df).fit()
-            anova_table = sm.stats.anova_lm(model, typ=2)
+        # SMART CHECK 1: dependent must be numeric
+        if not pd.api.types.is_numeric_dtype(df[dependent]):
+            st.error("Dependent variable must be numeric")
+        else:
+            st.subheader("ANOVA Results")
 
-            st.subheader("ANOVA Table")
-            st.dataframe(anova_table)
+            results_found = False
 
-            # Tukey
-            st.subheader("Tukey HSD Test")
+            for col in columns:
+                if col == dependent:
+                    continue
 
-            df["group"] = df[factor1].astype(str) + "_" + df[factor2].astype(str)
+                unique_vals = df[col].nunique()
 
-            tukey = pairwise_tukeyhsd(
-                endog=df[dependent],
-                groups=df["group"],
-                alpha=0.05
-            )
+                # SMART CHECK 2: treat as categorical only if limited unique values
+                if unique_vals <= 10:
+                    try:
+                        formula = f'{dependent} ~ C({col})'
+                        model = ols(formula, data=df).fit()
+                        anova_table = sm.stats.anova_lm(model, typ=2)
 
-            tukey_df = pd.DataFrame(
-                tukey._results_table.data[1:],
-                columns=tukey._results_table.data[0]
-            )
+                        st.write(f"Factor: {col}")
+                        st.dataframe(anova_table)
 
-            st.dataframe(tukey_df)
+                        results_found = True
 
-        except Exception as e:
-            st.error(f"Error: {e}")
+                    except:
+                        continue
+
+            if not results_found:
+                st.warning("No suitable categorical variables found (need <=10 unique values)")
