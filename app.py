@@ -2,96 +2,163 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy import stats
+from itertools import combinations
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
-st.title("Statistical Analysis App (ANOVA + Tukey)")
+st.title("Advanced ANOVA → Tukey → T-Test Pipeline")
 
-file = st.file_uploader("Upload CSV file", type=["csv"])
+file = st.file_uploader("Upload CSV", type=["csv"])
 
 if file is not None:
     df = pd.read_csv(file)
 
-    st.subheader("Dataset Preview")
+    st.write("Data Preview:")
     st.dataframe(df.head())
 
-    # Select continuous variable
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-    target = st.selectbox("Select Continuous Variable", numeric_cols)
+    # Step 1: select continuous variable
+    num_cols = df.select_dtypes(include=np.number).columns.tolist()
+    target = st.selectbox("Select Continuous Variable", num_cols)
 
     if target:
-        st.write(f"Selected variable: {target}")
 
-        # Identify categorical columns
+        alpha = 0.05
+
+        # Step 2: categorical columns
         cat_cols = df.select_dtypes(exclude=np.number).columns.tolist()
 
-        if len(cat_cols) == 0:
-            st.warning("No categorical variables found.")
+        st.write("Categorical columns:", cat_cols)
+
+        # -------- STEP 1: INDIVIDUAL --------
+        st.subheader("Step 1: Individual ANOVA")
+
+        significant_vars = []
+
+        for col in cat_cols:
+            temp = df[[col, target]].dropna()
+
+            groups = [temp[temp[col] == val][target]
+                      for val in temp[col].unique()
+                      if len(temp[temp[col] == val]) > 1]
+
+            if len(groups) > 1:
+                f, p = stats.f_oneway(*groups)
+                st.write(f"{col} → p = {p:.4f}")
+
+                if p < alpha:
+                    significant_vars.append(col)
+
+        st.write("Significant after Step 1:", significant_vars)
+
+        # -------- STEP 2: ADDITIVE COMBINATIONS --------
+        st.subheader("Step 2: Additive Combinations")
+
+        add_significant = []
+
+        for r in range(2, len(significant_vars) + 1):
+            for combo in combinations(significant_vars, r):
+
+                new_col = "_".join(combo)
+
+                temp = df[list(combo) + [target]].dropna()
+                temp[new_col] = temp[list(combo)].astype(str).agg("_".join, axis=1)
+
+                groups = [temp[temp[new_col] == val][target]
+                          for val in temp[new_col].unique()
+                          if len(temp[temp[new_col] == val]) > 1]
+
+                if len(groups) > 1:
+                    f, p = stats.f_oneway(*groups)
+                    st.write(f"{new_col} → p = {p:.4f}")
+
+                    if p < alpha:
+                        add_significant.append(new_col)
+
+        st.write("Significant after Step 2:", add_significant)
+
+        # -------- STEP 3: INTERACTION --------
+        st.subheader("Step 3: Interaction (Multiplication-like)")
+
+        final_vars = []
+
+        for col in add_significant:
+            temp = df[[target]].copy()
+            temp[col] = df[col.split("_")].astype(str).agg("_".join, axis=1)
+            temp = temp.dropna()
+
+            groups = [temp[temp[col] == val][target]
+                      for val in temp[col].unique()
+                      if len(temp[temp[col] == val]) > 1]
+
+            if len(groups) > 1:
+                f, p = stats.f_oneway(*groups)
+                st.write(f"{col} → p = {p:.4f}")
+
+                if p < alpha:
+                    final_vars.append(col)
+
+        st.write("Final selected variables:", final_vars)
+
+        # -------- STEP 4: TUKEY --------
+        st.subheader("Step 4: Tukey HSD")
+
+        tukey_results_df = pd.DataFrame()
+
+        for col in final_vars:
+            temp = df.copy()
+            temp[col] = temp[col.split("_")].astype(str).agg("_".join, axis=1)
+            temp = temp[[col, target]].dropna()
+
+            tukey = pairwise_tukeyhsd(
+                endog=temp[target],
+                groups=temp[col],
+                alpha=alpha
+            )
+
+            res_df = pd.DataFrame(data=tukey._results_table.data[1:],
+                                  columns=tukey._results_table.data[0])
+
+            # Keep only TRUE (reject)
+            res_df = res_df[res_df['reject'] == True]
+
+            if not res_df.empty:
+                res_df['variable'] = col
+                tukey_results_df = pd.concat([tukey_results_df, res_df])
+
+        if tukey_results_df.empty:
+            st.warning("No significant Tukey results.")
         else:
-            alpha = 0.05
+            st.dataframe(tukey_results_df)
 
-            st.header("ANOVA Analysis")
+            # -------- STEP 5: MAX MEAN DIFF --------
+            st.subheader("Step 5: Max Mean Difference")
 
-            for col in cat_cols:
+            tukey_results_df['abs_diff'] = tukey_results_df['meandiff'].abs()
 
-                st.subheader(f"Testing: {target} vs {col}")
+            best_row = tukey_results_df.loc[tukey_results_df['abs_diff'].idxmax()]
 
-                temp = df[[col, target]].dropna()
+            st.write("Best Pair:")
+            st.write(best_row)
 
-                groups = []
-                labels = []
+            # -------- STEP 6: T-TEST --------
+            st.subheader("Step 6: Final T-Test")
 
-                for val in temp[col].unique():
-                    group = temp[temp[col] == val][target]
-                    if len(group) > 1:
-                        groups.append(group)
-                        labels.append(val)
+            var = best_row['variable']
+            g1 = best_row['group1']
+            g2 = best_row['group2']
 
-                if len(groups) <= 1:
-                    st.write("Not enough groups to perform ANOVA.")
-                    continue
+            temp = df.copy()
+            temp[var] = temp[var.split("_")].astype(str).agg("_".join, axis=1)
+            temp = temp[[var, target]].dropna()
 
-                # Hypothesis
-                st.write("H0: All group means are equal")
-                st.write("H1: At least one group mean is different")
+            group1 = temp[temp[var] == g1][target]
+            group2 = temp[temp[var] == g2][target]
 
-                # ANOVA
-                f_stat, p_val = stats.f_oneway(*groups)
+            t_stat, p_val = stats.ttest_ind(group1, group2)
 
-                st.write(f"F-statistic: {f_stat:.4f}")
-                st.write(f"p-value: {p_val:.4f}")
+            st.write(f"T-statistic: {t_stat:.4f}")
+            st.write(f"P-value: {p_val:.4f}")
 
-                # Decision
-                if p_val < alpha:
-                    st.success("Reject H0 → Significant difference exists")
-                    
-                    # Tukey Test
-                    st.write("Performing Tukey Test...")
-
-                    tukey = pairwise_tukeyhsd(
-                        endog=temp[target],
-                        groups=temp[col],
-                        alpha=alpha
-                    )
-
-                    result_df = pd.DataFrame(
-                        data=tukey.summary().data[1:], 
-                        columns=tukey.summary().data[0]
-                    )
-
-                    st.dataframe(result_df)
-
-                    # Interpretation
-                    st.write("Interpretation:")
-
-                    significant_pairs = result_df[result_df["reject"] == True]
-
-                    if len(significant_pairs) == 0:
-                        st.write("No significant pairwise differences found.")
-                    else:
-                        for _, row in significant_pairs.iterrows():
-                            st.write(
-                                f"{row['group1']} vs {row['group2']} → significantly different"
-                            )
-
-                else:
-                    st.error("Fail to Reject H0 → No significant difference")
+            if p_val < alpha:
+                st.success("Final result is SIGNIFICANT")
+            else:
+                st.error("Final result is NOT significant")
